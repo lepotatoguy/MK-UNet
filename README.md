@@ -1,6 +1,6 @@
 # MK-UNet
 
-Official Pytorch implementation of the paper [MK-UNet: Multi-kernel Lightweight CNN for Medical Image Segmentation](https://arxiv.org/abs/2509.18493) published in ICCV CVAMD 2025
+Official Pytorch implementation of the paper [MK-UNet: Multi-kernel Lightweight CNN for Medical Image Segmentation](https://arxiv.org/abs/2509.18493) published in ICCV 2025 CVAMD
 [Md Mostafijur Rahman](https://mostafij-rahman.github.io/), [Radu Marculescu](https://radum.ece.utexas.edu/)
 <p>The University of Texas at Austin</p>
 
