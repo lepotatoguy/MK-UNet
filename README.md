@@ -1,12 +1,32 @@
-# MK-UNet
+# MK-UNet Extension of Vision Mamba
 
-Official Pytorch implementation of the paper [MK-UNet: Multi-kernel Lightweight CNN for Medical Image Segmentation](https://arxiv.org/abs/2509.18493) published in ICCV 2025 CVAMD
-[Md Mostafijur Rahman](https://mostafij-rahman.github.io/), [Radu Marculescu](https://radum.ece.utexas.edu/)
-<p>The University of Texas at Austin</p>
+#### Quick Run: 
+```
+conda env create -f environment.yml
+conda activate mku
+```
 
-#### 🔍 **Check out our CVPR 2025 paper! [EffiDec3D](https://github.com/SLDGroup/EffiDec3D)**
-#### 🔍 **Check out our CVPR 2024 paper! [EMCAD](https://github.com/SLDGroup/EMCAD)** 
-#### 🔍 **Check out our CVPRW 2024 paper! [PP-SAM](https://github.com/SLDGroup/PP-SAM)** 
-#### 🔍 **Check out our WACV 2024 paper! [G-CASCADE](https://github.com/SLDGroup/G-CASCADE)**
-#### 🔍 **Check out our MIDL 2023 paper! [MERIT](https://github.com/SLDGroup/MERIT)**
-#### 🔍 **Check out our WACV 2023 paper! [CASCADE](https://github.com/SLDGroup/CASCADE)**
+##### Dependencies:
+
+```
+
+# install Anaconda from https://www.anaconda.com/products/distribution
+# then open terminal or Anaconda Prompt
+
+conda create -n mku python=3.10 -y        # create new environment named 'mku' with Python 3.10
+conda activate mku                        # activate the environment
+
+# install PyTorch + torchvision + torchaudio (for CUDA 12.1)
+pip install torch torchvision torchaudio
+
+# or use this line instead if you want CPU-only PyTorch
+# pip install torch torchvision torchaudio
+
+pip install timm                          # install timm library (PyTorch image models)
+pip install numpy matplotlib tqdm opencv-python  # optional but useful dependencies
+pip install vision-mamba
+pip install datasets
+
+
+python -c "import torch, timm; print(torch.__version__, timm.__version__)"  # verify installations
+```
