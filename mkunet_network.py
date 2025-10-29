@@ -4,12 +4,135 @@ import torchvision
 import torch.nn.functional as F
 import os
 from functools import partial
+import math
 
 import timm
-from timm.models.layers import trunc_normal_tf_
+# from timm.models.layers import trunc_normal_tf_
+from timm.models.layers import trunc_normal_
 from timm.models.helpers import named_apply
 
 __all__ = ['MKUNet']
+
+
+# === NEW: Vision-Mamba (Vim) backbone adapter ===============================
+class VimBackbone(nn.Module):
+    """
+    Wrap a Vision-Mamba (Vim) model into a 5-level UNet encoder.
+    Returns [t1(×2), t2(×4), t3(×8), t4(×16), bottleneck(×32)]
+    with channels matching your `channels` list.
+    """
+    def __init__(self, in_channels=3, channels=[16,32,64,96,160]):
+        super().__init__()
+
+        # (1) ×2 stem — same as before
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, channels[0], 3, 2, 1, bias=False),
+            nn.BatchNorm2d(channels[0]),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels[0], channels[0], 3, 1, 1, bias=False),
+            nn.BatchNorm2d(channels[0]),
+            nn.ReLU(inplace=True),
+        )
+
+        # (2) Vision-Mamba (Vim) model
+        # Make sure vision_mamba is installed: pip install vision-mamba
+        from vision_mamba import Vim
+
+        self.backbone = Vim(
+            dim=256,
+            dt_rank=32,
+            dim_inner=256,
+            d_state=256,
+            num_classes=0,    # no classifier head
+            image_size=224,
+            patch_size=16,
+            channels=in_channels,
+            dropout=0.1,
+            depth=12,
+        )
+
+        self.backbone.output_head = nn.Identity()
+
+        # (3) project the Vim features to your chosen channel widths
+        # Vim produces one feature map (B, C, H', W') after patch embedding.
+        self.proj = nn.ModuleList([
+            nn.Conv2d(256, channels[i+1], 1, bias=False) for i in range(4)
+        ])
+        self.bn = nn.ModuleList([
+            nn.BatchNorm2d(channels[i+1]) for i in range(4)
+        ])
+
+    # def _forward_vim(self, x):
+    #     # Forward features only (skip classification head)
+    #     feats = self.backbone.forward_features(x)
+    #     # if output is [B, N, C], reshape to [B, C, H, W]
+    #     if feats.dim() == 3:
+    #         B, N, C = feats.shape
+    #         H = W = int(N ** 0.5)
+    #         feats = feats.transpose(1, 2).reshape(B, C, H, W)
+    #     return feats
+
+    def _forward_vim(self, x):
+        # call regular forward, since output_head = nn.Identity()
+        feats = self.backbone(x)
+        # if output is [B, N, C], reshape to [B, C, H, W]
+        if feats.dim() == 3:
+            B, N, C = feats.shape
+            H = W = int(N ** 0.5)
+            feats = feats.transpose(1, 2).reshape(B, C, H, W)
+        return feats
+
+
+    # def forward(self, x):
+    #     t1 = self.stem(x)               # ×2
+    #     f = self._forward_vim(x)        # base feature map from Vim
+    #     # progressively downsample to create 4 more scales
+    #     t2 = self.bn[0](self.proj[0](F.avg_pool2d(f, 2)))
+    #     t3 = self.bn[1](self.proj[1](F.avg_pool2d(f, 4)))
+    #     t4 = self.bn[2](self.proj[2](F.avg_pool2d(f, 8)))
+    #     b  = self.bn[3](self.proj[3](F.avg_pool2d(f, 16)))
+    #     return t1, t2, t3, t4, b
+
+    def forward(self, x):
+        """
+        Produce a 5-level UNet encoder pyramid that matches the original UNet
+        downsampling schedule for input 224x224:
+        t1 -> 112x112  (stem)
+        t2 -> 56x56
+        t3 -> 28x28
+        t4 -> 14x14
+        b  -> 7x7      (bottleneck)
+        We build t2/t3 by upsampling the Vim feature map (f = 14x14) so the
+        decoder's doubling steps line up exactly with these sizes.
+        """
+        t1 = self.stem(x)               # (B, channels[0], 112, 112)
+        f = self._forward_vim(x)        # (B, 256, 14, 14)  -- Vim patch tokens -> spatial map
+
+        # ensure f is spatial (it should be after _forward_vim)
+        # Now build the UNet-style pyramid:
+        # t4: same resolution as f (14x14)
+        t4_feat = f                                           # 14x14
+
+        # bottleneck: 7x7 (half of f)
+        b_feat  = F.adaptive_avg_pool2d(f, (7, 7))            # 7x7
+
+        # t3: 28x28 (upsampled from f)
+        t3_feat = F.interpolate(f, size=(28, 28), mode='bilinear', align_corners=False)
+
+        # t2: 56x56 (upsampled from f)
+        t2_feat = F.interpolate(f, size=(56, 56), mode='bilinear', align_corners=False)
+
+        # project each to desired channel widths & apply BN
+        t2 = self.bn[0](self.proj[0](t2_feat))   # -> channels[1]
+        t3 = self.bn[1](self.proj[1](t3_feat))   # -> channels[2]
+        t4 = self.bn[2](self.proj[2](t4_feat))   # -> channels[3]
+        b  = self.bn[3](self.proj[3](b_feat))    # -> channels[4]
+
+        return t1, t2, t3, t4, b
+
+
+# END NEW ---------------------------------------------------------------------
+
 
 def gcd(a, b):
     while b:
@@ -23,7 +146,8 @@ def _init_weights(module, name, scheme=''):
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif scheme == 'trunc_normal':
-            trunc_normal_tf_(module.weight, std=.02)
+            # trunc_normal_tf_(module.weight, std=.02)
+            trunc_normal_(module.weight, std=.02)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif scheme == 'xavier_normal':
@@ -481,8 +605,18 @@ class MK_UNet_S(nn.Module):
         
 class MK_UNet(nn.Module):
 
-    def __init__(self,  num_classes=1, in_channels=3, channels=[16,32,64,96,160], depths=[1, 1, 1, 1, 1], kernel_sizes=[1,3,5], expansion_factor=2, gag_kernel=3, **kwargs):
+    def __init__(self,  num_classes=1, in_channels=3, channels=[16,32,64,96,160], depths=[1, 1, 1, 1, 1], kernel_sizes=[1,3,5], expansion_factor=2, gag_kernel=3,
+                 use_vmamba: bool = False,             # <--- NEW
+                 mamba_variant: str = 'small',         # <--- NEW
+                 **kwargs):
         super().__init__()
+
+        self.use_vmamba = use_vmamba                 # <--- NEW
+        if self.use_vmamba:                          # <--- NEW
+            self.vmamba = VimBackbone(            # <--- NEW
+                in_channels=in_channels,
+                channels=channels,
+            )
         
         self.encoder1 = mk_irb_bottleneck(in_channels, channels[0], depths[0], 1, expansion_factor=expansion_factor, dw_parallel=True, add=True, kernel_sizes=kernel_sizes)
         self.encoder2 = mk_irb_bottleneck(channels[0], channels[1], depths[1], 1, expansion_factor=expansion_factor, dw_parallel=True, add=True, kernel_sizes=kernel_sizes)  
@@ -521,22 +655,26 @@ class MK_UNet(nn.Module):
         
         B = x.shape[0]
         ### Encoder
-        ### Stage 1
-        out = F.max_pool2d(self.encoder1(x),2,2)
-        t1 = out
-        ### Stage 2
-        out = F.max_pool2d(self.encoder2(out),2,2)
-        t2 = out
-        ### Stage 3
-        out = F.max_pool2d(self.encoder3(out),2,2)
-        t3 = out
+        if self.use_vmamba:
+            # NEW: 5 tensors already at the right scales / channels
+            t1, t2, t3, t4, out = self.vmamba(x)
+        else:
+            ### Stage 1
+            out = F.max_pool2d(self.encoder1(x),2,2)
+            t1 = out
+            ### Stage 2
+            out = F.max_pool2d(self.encoder2(out),2,2)
+            t2 = out
+            ### Stage 3
+            out = F.max_pool2d(self.encoder3(out),2,2)
+            t3 = out
 
-        ### Stage 4
-        out = F.max_pool2d(self.encoder4(out),2,2)
-        t4 = out
+            ### Stage 4
+            out = F.max_pool2d(self.encoder4(out),2,2)
+            t4 = out
 
-        ### Bottleneck
-        out = F.max_pool2d(self.encoder5(out),2,2)
+            ### Bottleneck
+            out = F.max_pool2d(self.encoder5(out),2,2)
 
         ### Stage 4
         out = self.CA1(out)*out
